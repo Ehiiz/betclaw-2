@@ -4,334 +4,324 @@ import { IBetSession } from '../models/BetSession'
 import { BetSlip } from '../models/BetSlip'
 import { SlipGame } from '../models/SlipGame'
 import { logger } from '../config/logger'
-import {
-  fetchUpcomingFixtures, fetchTeamForm, fetchH2H,
-  ProcessedFixture,
-} from '../services/sportsApi'
-import {
-  Temperament, PredictionType, TEMPERAMENT_CONFIG, FixtureScore,
-} from '../types'
+import { fetchUpcomingFixtures, ProcessedFixture } from '../services/sportsApi'
+import { fetchOddsForDate, normaliseTeamKey, generateSyntheticOdds } from '../services/oddsApi'
+import { runVerdictEngine, SlipForVerdict } from './verdictEngine'
+import { calculateStakes } from './stakingEngine'
+import { TEMPERAMENT_CONFIG, FixtureScore, PredictionType, Temperament } from '../types'
 
 const LEAGUE_TIER_BONUS: Record<string, number> = {
-  'Premier League':   5,
-  'La Liga':          5,
-  'Bundesliga':       5,
-  'Serie A':          5,
-  'Ligue 1':          5,
-  'Champions League': 5,
-  'Europa League':    3,
-  'Championship':     2,
+  'Premier League': 5,
+  'La Liga': 5,
+  'Bundesliga': 5,
+  'Serie A': 5,
+  'Süper Lig': 3,
+  'Championship': 2,
 }
 
-/**
- * Fetches fixtures, scores them, groups into slips,
- * and persists BetSlip + SlipGame records for the session.
- */
+const ALLOWED_LEAGUE_IDS = new Set([
+  39,   // English Premier League
+  140,  // La Liga (Spain)
+  78,   // Bundesliga (Germany)
+  135,  // Serie A (Italy)
+  203,  // Süper Lig (Turkey)
+  17,   // Championship (England)
+])
+
 export async function runCurationEngine(
-  track:      IBetTrack,
-  session:    IBetSession,
+  track: IBetTrack,
+  session: IBetSession,
   allocation: number,
+  verdictModel: 'gemini' | 'gpt-4o' = 'gemini',
 ): Promise<void> {
-  const config     = TEMPERAMENT_CONFIG[track.currentTemperament]
+  const config = TEMPERAMENT_CONFIG[track.currentTemperament]
   const temperament = track.currentTemperament
 
   logger.info({ trackId: track._id, sessionId: session._id, temperament }, 'Curation engine starting')
 
-  // ── Step 1: Fetch upcoming fixtures ─────────────────────────────────────────
+  // ── Step 1: Fetch fixtures ─────────────────────────────────────────────────
   const fixtures = await fetchUpcomingFixtures()
-
   if (fixtures.length === 0) {
-    logger.warn({ sessionId: session._id }, 'No fixtures available for curation')
+    logger.warn({ sessionId: session._id }, 'No fixtures available')
     return
   }
 
-  // ── Step 2: Score each fixture ───────────────────────────────────────────────
-  const scored = await scoreFixtures(fixtures, temperament)
+  const filteredFixtures = fixtures.filter(f => ALLOWED_LEAGUE_IDS.has(f.leagueId))
+  if (filteredFixtures.length === 0) {
+    logger.warn({ sessionId: session._id }, 'No fixtures from allowed leagues')
+    return
+  }
 
-  // Filter by minimum confidence score for this temperament
+  logger.info({
+    total: fixtures.length,
+    filtered: filteredFixtures.length,
+    leagues: [...ALLOWED_LEAGUE_IDS]
+  }, 'Fixtures filtered to allowed leagues')
+  // ── Step 2: Enrich with real odds (Odds API) with synthetic fallback ──────
+  logger.info('Fetching real odds from The Odds API...')
+  const oddsMap = await fetchOddsForDate()
+  logger.info({ realOddsCount: oddsMap.size }, 'Odds map built')
+
+  // Every fixture gets odds — real only, skip if not available
+  const enrichedFixtures: ProcessedFixture[] = filteredFixtures
+    .map(f => {
+      const key = normaliseTeamKey(f.homeTeam, f.awayTeam)
+      const realOdds = oddsMap.get(key)
+      if (realOdds && realOdds.home > 1) {
+        logger.debug({ fixture: `${f.homeTeam} vs ${f.awayTeam}` }, 'Using real odds')
+        return { ...f, odds: realOdds }
+      }
+      logger.debug({ fixture: `${f.homeTeam} vs ${f.awayTeam}` }, 'No real odds — skipping fixture')
+      return null
+    })
+    .filter(Boolean) as ProcessedFixture[]
+
+  logger.info({
+    total: filteredFixtures.length,
+    realOdds: enrichedFixtures.length,
+    skipped: filteredFixtures.length - enrichedFixtures.length,
+  }, 'Odds enrichment complete — synthetic odds disabled')
+
+  // ── Step 3: Score fixtures ─────────────────────────────────────────────────
+  const scored = scoreFixtures(enrichedFixtures, temperament)
   const qualified = scored.filter(s => s.confidenceScore >= config.minFixtureScore)
 
-  logger.info({ total: fixtures.length, qualified: qualified.length }, 'Fixtures scored and filtered')
+  logger.info({ total: enrichedFixtures.length, qualified: qualified.length }, 'Fixtures scored')
 
   if (qualified.length === 0) {
-    logger.warn({ sessionId: session._id }, 'No fixtures met minimum confidence threshold')
+    logger.warn({ sessionId: session._id }, 'No fixtures met confidence threshold')
     return
   }
 
-  // Sort by confidence descending
   qualified.sort((a, b) => b.confidenceScore - a.confidenceScore)
 
-  // ── Step 3: Determine slip count ─────────────────────────────────────────────
-  const slipCount   = randomBetween(config.slipsMin, config.slipsMax)
+  // ── Step 4: Assemble slip groups ──────────────────────────────────────────
+  const slipCount = randomBetween(config.slipsMin, config.slipsMax)
   const gamesPerSlip = randomBetween(config.gamesPerSlipMin, config.gamesPerSlipMax)
-  const totalGamesNeeded = slipCount * gamesPerSlip
+  const selected = qualified.slice(0, slipCount * gamesPerSlip)
 
-  // Take the top-N fixtures we need
-  const selected = qualified.slice(0, Math.min(totalGamesNeeded, qualified.length))
-
-  if (selected.length < slipCount) {
-    logger.warn({ needed: slipCount, available: selected.length }, 'Not enough fixtures for all slips — reducing slip count')
-  }
-
-  // ── Step 4: Group fixtures into slips ────────────────────────────────────────
   const slipGroups: FixtureScore[][] = []
-  let fixtureIndex = 0
-
   for (let i = 0; i < slipCount; i++) {
     const group: FixtureScore[] = []
     for (let j = 0; j < gamesPerSlip; j++) {
-      if (fixtureIndex < selected.length) {
-        group.push(selected[fixtureIndex++])
-      }
+      const idx = i * gamesPerSlip + j
+      if (idx < selected.length) group.push(selected[idx])
     }
     if (group.length > 0) slipGroups.push(group)
   }
 
-  // ── Step 5: Calculate stakes via staking engine ───────────────────────────────
-  const { calculateStakes } = await import('./stakingEngine')
-
+  // ── Step 5: Calculate initial stakes ────────────────────────────────────────
   const slipInputs = slipGroups.map((group, idx) => ({
-    index:        idx,
+    index: idx,
     combinedOdds: group.reduce((prod, g) => prod * g.odds, 1),
   }))
+  const initialStakes = calculateStakes(slipInputs, allocation, temperament)
 
-  const stakes = calculateStakes(slipInputs, allocation, temperament)
+  // ── Step 6: Build slip data for Verdict Engine ────────────────────────────
+  const slipsForVerdict: SlipForVerdict[] = slipGroups.map((group, i) => {
+    const stakeData = initialStakes.find(s => s.slipIndex === i)!
+    const combinedOdds = +group.reduce((prod, g) => prod * g.odds, 1).toFixed(2)
+    return {
+      slipIndex: i,
+      combinedOdds,
+      stake: stakeData.stake,
+      potentialReturn: Math.floor(stakeData.stake * combinedOdds),
+      confidenceScore: +(group.reduce((s, g) => s + g.confidenceScore, 0) / group.length).toFixed(1),
+      games: group.map(g => ({
+        homeTeam: g.homeTeam,
+        awayTeam: g.awayTeam,
+        league: g.league,
+        kickoffTime: g.kickoffTime,
+        prediction: g.bestPrediction,
+        predictionType: g.bestPrediction,
+        odds: g.odds,
+        confidenceScore: g.confidenceScore,
+      })),
+    }
+  })
 
-  // ── Step 6: Persist BetSlips and SlipGames ────────────────────────────────────
+  // ── Step 7: Run GPT-4o Verdict Engine ────────────────────────────────────
+  const verdicts = await runVerdictEngine(slipsForVerdict, temperament, {
+    budget: track.budget,
+    remainingBudget: track.remainingBudget,
+    target: track.target,
+    totalPnL: track.totalPnL,
+    sessionCount: track.sessionCount,
+  }, verdictModel)
+
+  // Filter and adjust based on verdicts
+  const approvedGroups = slipGroups.filter((_, i) => {
+    const v = verdicts.get(i)
+    return v?.verdict !== 'skip'
+  })
+
+  if (approvedGroups.length === 0) {
+    logger.warn({ sessionId: session._id }, 'All slips skipped by Verdict Engine')
+    return
+  }
+
+  // Recalculate stakes for approved slips only
+  const approvedInputs = approvedGroups.map((group, idx) => ({
+    index: idx,
+    combinedOdds: group.reduce((prod, g) => prod * g.odds, 1),
+  }))
+  const finalStakes = calculateStakes(approvedInputs, allocation, temperament)
+
+  // ── Step 8: Persist BetSlips and SlipGames ────────────────────────────────
   let latestSettlementTime = new Date(0)
 
-  for (let i = 0; i < slipGroups.length; i++) {
-    const group       = slipGroups[i]
-    const stakeData   = stakes.find(s => s.slipIndex === i)
-    if (!stakeData) continue
+  for (let i = 0; i < approvedGroups.length; i++) {
+    const group = approvedGroups[i]
+    const stakeData = finalStakes.find(s => s.slipIndex === i)!
+    const originalIdx = slipGroups.indexOf(group)
+    const verdict = verdicts.get(originalIdx)!
 
-    const combinedOdds     = group.reduce((prod, g) => prod * g.odds, 1)
-    const avgConfidence    = group.reduce((sum, g) => sum + g.confidenceScore, 0) / group.length
-    const lastGameKickoff  = group.reduce((latest, g) => g.kickoffTime > latest ? g.kickoffTime : latest, new Date(0))
-    const settlementTime   = new Date(lastGameKickoff.getTime() + 110 * 60 * 1000)
-
-    if (settlementTime > latestSettlementTime) {
-      latestSettlementTime = settlementTime
+    // Apply stake reduction for 'reduce' verdicts
+    let finalStake = stakeData.stake
+    if (verdict.verdict === 'reduce') {
+      const reducedCap = allocation * 0.20
+      finalStake = Math.min(finalStake, reducedCap)
+      logger.info({ slipIndex: i, original: stakeData.stake, reduced: finalStake }, 'Stake reduced by verdict')
     }
 
+    const combinedOdds = +group.reduce((prod, g) => prod * g.odds, 1).toFixed(2)
+    const avgConfidence = +(group.reduce((s, g) => s + g.confidenceScore, 0) / group.length).toFixed(1)
+    const lastKickoff = group.reduce((latest, g) => g.kickoffTime > latest ? g.kickoffTime : latest, new Date(0))
+    const settlementTime = new Date(lastKickoff.getTime() + 110 * 60 * 1000)
+
+    if (settlementTime > latestSettlementTime) latestSettlementTime = settlementTime
+
     const slip = await BetSlip.create({
-      sessionId:          session._id,
-      trackId:            track._id,
-      userId:             track.userId,
-      stake:              stakeData.stake,
-      combinedOdds:       parseFloat(combinedOdds.toFixed(2)),
-      potentialReturn:    Math.floor(stakeData.stake * combinedOdds),
-      confidenceScore:    parseFloat(avgConfidence.toFixed(1)),
+      sessionId: session._id,
+      trackId: track._id,
+      userId: track.userId,
+      stake: finalStake,
+      combinedOdds,
+      potentialReturn: Math.floor(finalStake * combinedOdds),
+      confidenceScore: avgConfidence,
       lastSettlementTime: settlementTime,
+      verdict: verdict.verdict,
+      verdictModel: verdict.model,
+      verdictConfidence: verdict.confidence,
+      verdictReasoning: verdict.reasoning,
+      verdictAnalysis: verdict.analysis,
     })
 
-    // Persist each game in this slip
     for (const game of group) {
-      const gameSettlementTime = new Date(game.kickoffTime.getTime() + 110 * 60 * 1000)
-
       await SlipGame.create({
-        slipId:            slip._id,
-        sessionId:         session._id,
+        slipId: slip._id,
+        sessionId: session._id,
         externalFixtureId: game.fixtureId,
-        league:            game.league,
-        homeTeam:          game.homeTeam,
-        awayTeam:          game.awayTeam,
-        kickoffTime:       game.kickoffTime,
-        predictionType:    game.bestPrediction,
-        prediction:        game.bestPrediction,
-        odds:              game.odds,
-        confidenceScore:   game.confidenceScore,
-        settlementTime:    gameSettlementTime,
+        league: game.league,
+        homeTeam: game.homeTeam,
+        awayTeam: game.awayTeam,
+        kickoffTime: game.kickoffTime,
+        predictionType: game.bestPrediction,
+        prediction: game.bestPrediction,
+        odds: game.odds,
+        confidenceScore: game.confidenceScore,
+        settlementTime: new Date(game.kickoffTime.getTime() + 110 * 60 * 1000),
       })
     }
 
-    logger.info(
-      { slipId: slip._id, games: group.length, stake: stakeData.stake, combinedOdds },
-      'Slip created'
-    )
+    logger.info({
+      slipId: slip._id,
+      games: group.length,
+      stake: finalStake,
+      combinedOdds,
+      verdict: verdict.verdict,
+      confidence: verdict.confidence,
+      reasoning: verdict.reasoning,
+    }, 'Slip created with verdict')
   }
 
-  // ── Step 7: Update session totals ────────────────────────────────────────────
-  const allSlips   = await BetSlip.find({ sessionId: session._id })
-  const totalStaked = allSlips.reduce((sum, s) => sum + s.stake, 0)
-
-  session.totalStaked = totalStaked
+  // ── Step 9: Update session totals ─────────────────────────────────────────
+  const allSlips = await BetSlip.find({ sessionId: session._id })
+  session.totalStaked = allSlips.reduce((sum, s) => sum + s.stake, 0)
   await session.save()
 
-  logger.info(
-    { sessionId: session._id, slips: slipGroups.length, totalStaked, latestSettlementTime },
-    'Curation complete'
-  )
+  logger.info({
+    sessionId: session._id,
+    totalSlips: approvedGroups.length,
+    skippedSlips: slipGroups.length - approvedGroups.length,
+    totalStaked: session.totalStaked,
+    settlementAt: latestSettlementTime,
+  }, 'Curation complete')
 }
 
 // ─── Fixture scoring ──────────────────────────────────────────────────────────
-
-async function scoreFixtures(
-  fixtures:    ProcessedFixture[],
-  temperament: Temperament,
-): Promise<FixtureScore[]> {
+function scoreFixtures(fixtures: ProcessedFixture[], temperament: Temperament): FixtureScore[] {
   const config = TEMPERAMENT_CONFIG[temperament]
-  const scored: FixtureScore[] = []
+  return fixtures.map(f => {
+    const { bestPrediction, odds } = pickBestPrediction(f, config)
+    if (!odds || odds < 1.1) return null
 
-  // Batch form requests — limit concurrency to avoid rate limits
-  const BATCH_SIZE = 5
+    // Hard enforce: individual game odds must be within a sane range
+    // Max single-game odds depends on temperament — prevents runaway accumulators
+    const maxSingleOdds = temperament === 'conservative' ? 3.0
+      : temperament === 'moderate' ? 5.0
+        : temperament === 'aggressive' ? 9.0
+          : 2.5  // restorative
 
-  for (let i = 0; i < fixtures.length; i += BATCH_SIZE) {
-    const batch = fixtures.slice(i, i + BATCH_SIZE)
+    if (odds > maxSingleOdds) return null
 
-    await Promise.all(batch.map(async (fixture) => {
-      try {
-        const [homeForm, awayForm, h2h] = await Promise.all([
-          fetchTeamForm(fixture.homeTeamId),
-          fetchTeamForm(fixture.awayTeamId),
-          fetchH2H(fixture.homeTeamId, fixture.awayTeamId),
-        ])
+    const oddsScore = scoreOdds(odds, config.oddsMin, config.oddsMax)
+    const leagueBonus = LEAGUE_TIER_BONUS[f.league] ?? 0
+    const score = (oddsScore * 0.70) + (leagueBonus * 3)
 
-        // Pick the best prediction market for this fixture
-        const { bestPrediction, odds, confidence } = pickBestPrediction(fixture, config)
+    // In scoreFixtures, after calculating score:
+    logger.debug({
+      fixture: `${f.homeTeam} vs ${f.awayTeam}`,
+      oddsScore: oddsScore.toFixed(1),
+      leagueBonus,
+      finalScore: Math.min(Math.round(score), 100),
+      threshold: config.minFixtureScore,
+      passed: Math.round(score) >= config.minFixtureScore,
+    }, 'Fixture scored')
 
-        if (!odds) return  // no usable odds
-
-        // Validate odds are within temperament range
-        // For multi-game slips the combined odds are what matter,
-        // but per-game odds still need to be reasonable
-        if (odds < 1.1) return
-
-        const score = computeFixtureScore(
-          fixture, homeForm, awayForm, h2h,
-          bestPrediction, odds, config,
-        )
-
-        scored.push({
-          fixtureId:       fixture.fixtureId,
-          homeTeam:        fixture.homeTeam,
-          awayTeam:        fixture.awayTeam,
-          league:          fixture.league,
-          kickoffTime:     fixture.kickoffTime,
-          confidenceScore: score,
-          bestPrediction,
-          odds,
-        })
-      } catch (err) {
-        logger.warn({ err, fixtureId: fixture.fixtureId }, 'Error scoring fixture — skipping')
-      }
-    }))
-  }
-
-  return scored
+    return {
+      fixtureId: f.fixtureId,
+      homeTeam: f.homeTeam,
+      awayTeam: f.awayTeam,
+      league: f.league,
+      kickoffTime: f.kickoffTime,
+      confidenceScore: Math.min(Math.round(score), 100),
+      bestPrediction,
+      odds,
+    } as FixtureScore
+  }).filter(Boolean) as FixtureScore[]
 }
 
 function pickBestPrediction(
   fixture: ProcessedFixture,
-  config:  { oddsMin: number; oddsMax: number },
-): { bestPrediction: PredictionType; odds: number; confidence: number } {
+  config: { oddsMin: number; oddsMax: number },
+): { bestPrediction: PredictionType; odds: number } {
   const { odds } = fixture
-  const { oddsMin, oddsMax } = config
-
-  // All candidate markets
-  const candidates: Array<{ type: PredictionType; odds: number }> = [
-    { type: PredictionType.HOME_WIN,  odds: odds.home    },
-    { type: PredictionType.DRAW,      odds: odds.draw    },
-    { type: PredictionType.AWAY_WIN,  odds: odds.away    },
-    { type: PredictionType.BTTS_YES,  odds: odds.bttsYes },
-    { type: PredictionType.BTTS_NO,   odds: odds.bttsNo  },
-    { type: PredictionType.OVER_25,   odds: odds.over25  },
-    { type: PredictionType.UNDER_25,  odds: odds.under25 },
+  const candidates = [
+    { type: PredictionType.HOME_WIN, odds: odds.home },
+    { type: PredictionType.DRAW, odds: odds.draw },
+    { type: PredictionType.AWAY_WIN, odds: odds.away },
+    { type: PredictionType.BTTS_YES, odds: odds.bttsYes },
+    { type: PredictionType.BTTS_NO, odds: odds.bttsNo },
+    { type: PredictionType.OVER_25, odds: odds.over25 },
+    { type: PredictionType.UNDER_25, odds: odds.under25 },
   ].filter(c => c.odds > 1.05)
 
-  // Prefer candidates whose odds fall within the temperament's target range
-  const inRange = candidates.filter(c => c.odds >= oddsMin && c.odds <= oddsMax)
-  const pool    = inRange.length > 0 ? inRange : candidates
+  const inRange = candidates.filter(c => c.odds >= config.oddsMin && c.odds <= config.oddsMax)
+  const pool = inRange.length > 0 ? inRange : candidates
+  if (pool.length === 0) return { bestPrediction: PredictionType.HOME_WIN, odds: 0 }
 
-  if (pool.length === 0) {
-    return { bestPrediction: PredictionType.HOME_WIN, odds: 0, confidence: 0 }
-  }
-
-  // Pick the one closest to the middle of the target range
-  const midpoint = (oddsMin + oddsMax) / 2
+  const mid = (config.oddsMin + config.oddsMax) / 2
   const best = pool.reduce((prev, curr) =>
-    Math.abs(curr.odds - midpoint) < Math.abs(prev.odds - midpoint) ? curr : prev
+    Math.abs(curr.odds - mid) < Math.abs(prev.odds - mid) ? curr : prev
   )
-
-  return { bestPrediction: best.type, odds: best.odds, confidence: 50 }
+  return { bestPrediction: best.type, odds: best.odds }
 }
 
-function computeFixtureScore(
-  fixture:    ProcessedFixture,
-  homeForm:   any,
-  awayForm:   any,
-  h2h:        any[],
-  prediction: PredictionType,
-  odds:       number,
-  config:     { oddsMin: number; oddsMax: number },
-): number {
-  let score = 0
-
-  // ── Odds attractiveness (40%) ─────────────────────────────────────────────
-  const { oddsMin, oddsMax } = config
-  const midpoint = (oddsMin + oddsMax) / 2
-  const range    = (oddsMax - oddsMin) / 2 || 1
-  const oddsDist = Math.abs(odds - midpoint) / range
-  const oddsScore = Math.max(0, 100 - oddsDist * 100)
-  score += oddsScore * 0.40
-
-  // ── Home team form (20%) ──────────────────────────────────────────────────
-  const homeFormScore = homeForm ? calcFormScore(homeForm.form ?? '') : 50
-  score += homeFormScore * 0.20
-
-  // ── Away team form (20%) ──────────────────────────────────────────────────
-  const awayFormScore = awayForm ? calcFormScore(awayForm.form ?? '') : 50
-  score += awayFormScore * 0.20
-
-  // ── H2H record (15%) ─────────────────────────────────────────────────────
-  const h2hScore = calcH2HScore(h2h, prediction, fixture.homeTeam)
-  score += h2hScore * 0.15
-
-  // ── League tier bonus (5%) ────────────────────────────────────────────────
-  const leagueBonus = LEAGUE_TIER_BONUS[fixture.league] ?? 0
-  score += leagueBonus
-
-  return Math.min(Math.round(score), 100)
-}
-
-function calcFormScore(form: string): number {
-  if (!form) return 50
-  const recent = form.slice(-5).split('')
-  const points = recent.reduce((sum, r) => {
-    if (r === 'W') return sum + 3
-    if (r === 'D') return sum + 1
-    return sum
-  }, 0)
-  return (points / 15) * 100  // max 15 points (5W) → 100
-}
-
-function calcH2HScore(h2h: any[], prediction: PredictionType, homeTeam: string): number {
-  if (!h2h?.length) return 50
-
-  let wins = 0
-  for (const match of h2h.slice(-5)) {
-    const hg = match.score?.fulltime?.home ?? 0
-    const ag = match.score?.fulltime?.away ?? 0
-    const matchHome = match.teams?.home?.name === homeTeam
-
-    const won = checkH2HPrediction(prediction, hg, ag, matchHome)
-    if (won) wins++
-  }
-
-  return (wins / Math.min(h2h.length, 5)) * 100
-}
-
-function checkH2HPrediction(prediction: PredictionType, hg: number, ag: number, matchHome: boolean): boolean {
-  switch (prediction) {
-    case PredictionType.HOME_WIN:  return matchHome ? hg > ag : ag > hg
-    case PredictionType.AWAY_WIN:  return matchHome ? ag > hg : hg > ag
-    case PredictionType.DRAW:      return hg === ag
-    case PredictionType.BTTS_YES:  return hg > 0 && ag > 0
-    case PredictionType.BTTS_NO:   return hg === 0 || ag === 0
-    case PredictionType.OVER_25:   return (hg + ag) > 2.5
-    case PredictionType.UNDER_25:  return (hg + ag) < 2.5
-    default: return false
-  }
+function scoreOdds(odds: number, min: number, max: number): number {
+  const mid = (min + max) / 2
+  const range = (max - min) / 2 || 1
+  return Math.max(0, 100 - (Math.abs(odds - mid) / range) * 100)
 }
 
 function randomBetween(min: number, max: number): number {

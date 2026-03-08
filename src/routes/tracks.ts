@@ -3,21 +3,24 @@ import { z } from 'zod'
 import { Types } from 'mongoose'
 import { BetTrack } from '../models/BetTrack'
 import { BetSession } from '../models/BetSession'
+import { PulseJob } from '../models/PulseJob'
 import { authenticate } from '../middleware/auth'
 import { validate } from '../middleware/validate'
 import { AppError } from '../middleware/errorHandler'
-import { Temperament, TrackStatus, DurationType } from '../types'
+import { Temperament, TrackStatus, DurationType, SessionStatus, PulseStatus } from '../types'
+import { logger } from '../config/logger'
 
 const router = Router()
 router.use(authenticate)
 
 const createTrackSchema = z.object({
-  name: z.string().min(1).max(100),
-  budget: z.number().positive('Budget must be positive'),
-  target: z.number().positive('Target must be positive'),
+  name:        z.string().min(1).max(100),
+  budget:      z.number().positive('Budget must be positive'),
+  target:      z.number().positive('Target must be positive'),
   temperament: z.enum([Temperament.CONSERVATIVE, Temperament.MODERATE, Temperament.AGGRESSIVE]),
+  verdictModel: z.enum(['gemini', 'gpt-4o']).default('gemini'),
   duration: z.object({
-    type: z.enum([DurationType.DAYS, DurationType.SESSIONS]),
+    type:  z.enum([DurationType.DAYS, DurationType.SESSIONS]),
     value: z.number().int().positive(),
   }),
 })
@@ -26,7 +29,7 @@ const createTrackSchema = z.object({
 router.post('/', validate(createTrackSchema), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const userId = req.user!.userId
-    const { name, budget, target, temperament, duration } = req.body
+    const { name, budget, target, temperament, verdictModel, duration } = req.body
 
     if (target <= budget) {
       throw new AppError(400, 'Target must be greater than initial budget')
@@ -42,13 +45,14 @@ router.post('/', validate(createTrackSchema), async (req: Request, res: Response
     }
 
     const track = await BetTrack.create({
-      userId: new Types.ObjectId(userId),
+      userId:              new Types.ObjectId(userId),
       name,
       budget,
-      remainingBudget: budget,
+      remainingBudget:     budget,
       target,
       startingTemperament: temperament,
-      currentTemperament: temperament,
+      currentTemperament:  temperament,
+      verdictModel:        verdictModel ?? 'gemini',
       duration,
       endsAt,
     })
@@ -104,19 +108,19 @@ router.get('/:id/summary', async (req: Request, res: Response, next: NextFunctio
     res.json({
       success: true,
       data: {
-        trackId: track._id,
-        name: track.name,
-        status: track.status,
-        currentTemperament: track.currentTemperament,
-        budget: track.budget,
-        remainingBudget: track.remainingBudget,
-        target: track.target,
-        totalPnL: track.totalPnL,
-        progressToTarget: Math.min(progressToTarget, 100).toFixed(2) + '%',
+        trackId:             track._id,
+        name:                track.name,
+        status:              track.status,
+        currentTemperament:  track.currentTemperament,
+        budget:              track.budget,
+        remainingBudget:     track.remainingBudget,
+        target:              track.target,
+        totalPnL:            track.totalPnL,
+        progressToTarget:    Math.min(progressToTarget, 100).toFixed(2) + '%',
         budgetUsed,
-        sessionCount: track.sessionCount,
-        startedAt: track.startedAt,
-        endsAt: track.endsAt,
+        sessionCount:        track.sessionCount,
+        startedAt:           track.startedAt,
+        endsAt:              track.endsAt,
       },
     })
   } catch (err) {
@@ -154,7 +158,45 @@ router.patch('/:id/pause', async (req: Request, res: Response, next: NextFunctio
     track.status = TrackStatus.PAUSED
     await track.save()
 
-    res.json({ success: true, data: track })
+    // Cancel all active BullMQ settlement jobs for this track's sessions
+    const { getQueue } = await import('../workers/queues')
+    const settlementQueue = getQueue('settlement')
+    const pulseQueue      = getQueue('pulse')
+
+    // Find all active/settling sessions for this track
+    const activeSessions = await BetSession.find({
+      trackId: track._id,
+      status:  { $in: [SessionStatus.ACTIVE, SessionStatus.SETTLING, SessionStatus.PULSING] },
+    })
+
+    let cancelledJobs = 0
+    for (const session of activeSessions) {
+      // Cancel settlement job
+      if (session.settlementJobId) {
+        try {
+          const job = await settlementQueue.getJob(session.settlementJobId)
+          if (job) { await job.remove(); cancelledJobs++ }
+        } catch { /* job may already be gone */ }
+      }
+
+      // Cancel all active pulse jobs for this session
+      const pulseJobs = await PulseJob.find({ sessionId: session._id, status: PulseStatus.ACTIVE })
+      for (const pulse of pulseJobs) {
+        try {
+          const job = await pulseQueue.getJob(pulse.bullJobId)
+          if (job) { await job.remove(); cancelledJobs++ }
+        } catch { /* job may already be gone */ }
+        pulse.status = PulseStatus.CANCELLED
+        await pulse.save()
+      }
+
+      // Mark session as paused-state (keep as active but note track is paused)
+      // We don't cancel the session itself — it can resume
+    }
+
+    logger.info({ trackId: track._id, cancelledJobs, sessions: activeSessions.length }, 'Track paused — jobs cancelled')
+
+    res.json({ success: true, data: track, meta: { cancelledJobs } })
   } catch (err) {
     next(err)
   }

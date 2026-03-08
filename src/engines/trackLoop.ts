@@ -44,7 +44,7 @@ export async function startTrackLoop(trackId: string): Promise<void> {
     logger.info({ sessionId: session._id, sessionNumber: session.sessionNumber }, 'Session created')
 
     // ── Step 3: Run curation ───────────────────────────────────────────────────
-    await runCurationEngine(track, session, allocation.amount)
+    await runCurationEngine(track, session, allocation.amount, track.verdictModel as 'gemini' | 'gpt-4o')
 
     // ── Step 4: Find latest settlement time across all slips ───────────────────
     const allSlips = await BetSlip.find({ sessionId: session._id })

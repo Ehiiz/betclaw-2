@@ -12,6 +12,9 @@ const envSchema = z.object({
   JWT_EXPIRES_IN:        z.string().default('24h'),
   SPORTS_API_KEY:        z.string().min(1, 'SPORTS_API_KEY is required'),
   SPORTS_API_HOST:       z.string().default('v3.football.api-sports.io'),
+  ODDS_API_KEY:          z.string().default(''),
+  OPENAI_API_KEY:        z.string().default(''),
+  GEMINI_API_KEY:        z.string().default(''),
   MIN_STAKE:             z.string().transform(Number).default('500'),
   FIXTURE_WINDOW_HOURS:  z.string().transform(Number).default('48'),
 })

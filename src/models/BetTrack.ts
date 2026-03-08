@@ -9,6 +9,7 @@ export interface IBetTrack extends Document {
   target:               number
   startingTemperament:  Temperament
   currentTemperament:   Temperament
+  verdictModel:         'gemini' | 'gpt-4o'
   duration:             { type: DurationType; value: number }
   status:               TrackStatus
   sessionCount:         number
@@ -38,6 +39,11 @@ const BetTrackSchema = new Schema<IBetTrack>(
       type: String,
       enum: Object.values(Temperament),
       required: true,
+    },
+    verdictModel: {
+      type:    String,
+      enum:    ['gemini', 'gpt-4o'],
+      default: 'gemini',
     },
 
     duration: {
