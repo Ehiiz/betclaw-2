@@ -8,7 +8,7 @@ import { fetchUpcomingFixtures, ProcessedFixture } from '../services/sportsApi'
 import { fetchOddsForDate, normaliseTeamKey, generateSyntheticOdds } from '../services/oddsApi'
 import { runVerdictEngine, SlipForVerdict } from './verdictEngine'
 import { calculateStakes } from './stakingEngine'
-import { TEMPERAMENT_CONFIG, FixtureScore, PredictionType, Temperament } from '../types'
+import { TEMPERAMENT_CONFIG, FixtureScore, PredictionType, Temperament, SlipStatus } from '../types'
 
 const LEAGUE_TIER_BONUS: Record<string, number> = {
   'Premier League': 5,
@@ -170,14 +170,21 @@ export async function runCurationEngine(
   // ── Step 8: Persist BetSlips and SlipGames ────────────────────────────────
   let latestSettlementTime = new Date(0)
 
-  for (let i = 0; i < approvedGroups.length; i++) {
-    const group = approvedGroups[i]
-    const stakeData = finalStakes.find(s => s.slipIndex === i)!
-    const originalIdx = slipGroups.indexOf(group)
+  // Persist ALL slips — approved ones as pending, skipped ones as void for UI visibility
+  for (let i = 0; i < slipGroups.length; i++) {
+    const group = slipGroups[i]
+    const originalIdx = i
     const verdict = verdicts.get(originalIdx)!
+    const isSkipped = verdict.verdict === 'skip'
+
+    // For skipped slips, use the initial stake calculation for display purposes
+    const stakeData = isSkipped
+      ? initialStakes.find(s => s.slipIndex === i)!
+      : finalStakes.find(s => s.slipIndex === approvedGroups.indexOf(group))!
+
+    let finalStake = stakeData?.stake ?? 0
 
     // Apply stake reduction for 'reduce' verdicts
-    let finalStake = stakeData.stake
     if (verdict.verdict === 'reduce') {
       const reducedCap = allocation * 0.20
       finalStake = Math.min(finalStake, reducedCap)
@@ -189,7 +196,7 @@ export async function runCurationEngine(
     const lastKickoff = group.reduce((latest, g) => g.kickoffTime > latest ? g.kickoffTime : latest, new Date(0))
     const settlementTime = new Date(lastKickoff.getTime() + 110 * 60 * 1000)
 
-    if (settlementTime > latestSettlementTime) latestSettlementTime = settlementTime
+    if (!isSkipped && settlementTime > latestSettlementTime) latestSettlementTime = settlementTime
 
     const slip = await BetSlip.create({
       sessionId: session._id,
@@ -200,6 +207,7 @@ export async function runCurationEngine(
       potentialReturn: Math.floor(finalStake * combinedOdds),
       confidenceScore: avgConfidence,
       lastSettlementTime: settlementTime,
+      status: isSkipped ? SlipStatus.VOID : SlipStatus.PENDING,
       verdict: verdict.verdict,
       verdictModel: verdict.model,
       verdictConfidence: verdict.confidence,
@@ -230,9 +238,77 @@ export async function runCurationEngine(
       stake: finalStake,
       combinedOdds,
       verdict: verdict.verdict,
+      status: isSkipped ? 'void' : 'pending',
       confidence: verdict.confidence,
       reasoning: verdict.reasoning,
     }, 'Slip created with verdict')
+  }
+
+  // ── Step 8b: If any slips were reduced, create a bonus slip with the saved amount ──
+  const reducedSlips = slipGroups.filter((_, i) => verdicts.get(i)?.verdict === 'reduce')
+
+  if (reducedSlips.length > 0 && qualified.length > 0) {
+    // Calculate total saved from reductions
+    const totalSaved = reducedSlips.reduce((sum, group, idx) => {
+      const originalStake = initialStakes.find(s => s.slipIndex === slipGroups.indexOf(group))?.stake ?? 0
+      const reducedStake = Math.min(originalStake, allocation * 0.20)
+      return sum + (originalStake - reducedStake)
+    }, 0)
+
+    if (totalSaved >= 100) { // only create bonus slip if there's meaningful amount saved
+      // Pick games not already used in any slip
+      const usedFixtureIds = new Set(slipGroups.flat().map(g => g.fixtureId))
+      const freshGames = qualified.filter(g => !usedFixtureIds.has(g.fixtureId))
+
+      if (freshGames.length >= 2) {
+        const bonusGroup = freshGames.slice(0, 2)
+        const bonusCombinedOdds = +bonusGroup.reduce((prod, g) => prod * g.odds, 1).toFixed(2)
+        const lastKickoff = bonusGroup.reduce((latest, g) => g.kickoffTime > latest ? g.kickoffTime : latest, new Date(0))
+        const settlementTime = new Date(lastKickoff.getTime() + 110 * 60 * 1000)
+        if (settlementTime > latestSettlementTime) latestSettlementTime = settlementTime
+
+        const bonusSlip = await BetSlip.create({
+          sessionId: session._id,
+          trackId: track._id,
+          userId: track.userId,
+          stake: Math.floor(totalSaved),
+          combinedOdds: bonusCombinedOdds,
+          potentialReturn: Math.floor(totalSaved * bonusCombinedOdds),
+          confidenceScore: +(bonusGroup.reduce((s, g) => s + g.confidenceScore, 0) / bonusGroup.length).toFixed(1),
+          lastSettlementTime: settlementTime,
+          status: SlipStatus.PENDING,
+          verdict: 'bet',
+          verdictModel: 'gemini',
+          verdictConfidence: 60,
+          verdictReasoning: `Bonus slip created from ₦${Math.floor(totalSaved)} saved via stake reduction on ${reducedSlips.length} slip(s).`,
+          verdictAnalysis: { overview: 'Auto-generated bonus slip from reduction savings.', oddsAssessment: '', combinationRisk: '', leagueInsight: '', recommendation: '', keyRisks: [], keyStrengths: [], flags: ['bonus_slip'] },
+        })
+
+        for (const game of bonusGroup) {
+          await SlipGame.create({
+            slipId: bonusSlip._id,
+            sessionId: session._id,
+            externalFixtureId: game.fixtureId,
+            league: game.league,
+            homeTeam: game.homeTeam,
+            awayTeam: game.awayTeam,
+            kickoffTime: game.kickoffTime,
+            predictionType: game.bestPrediction,
+            prediction: game.bestPrediction,
+            odds: game.odds,
+            confidenceScore: game.confidenceScore,
+            settlementTime: new Date(game.kickoffTime.getTime() + 110 * 60 * 1000),
+          })
+        }
+
+        logger.info({
+          bonusSlipId: bonusSlip._id,
+          stake: Math.floor(totalSaved),
+          combinedOdds: bonusCombinedOdds,
+          games: bonusGroup.length,
+        }, 'Bonus slip created from reduction savings')
+      }
+    }
   }
 
   // ── Step 9: Update session totals ─────────────────────────────────────────
