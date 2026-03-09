@@ -1,14 +1,16 @@
 FROM node:20-alpine AS builder
+# BetClaw production build v1.1
 WORKDIR /app
 COPY package*.json ./
-RUN npm run install
+RUN npm install
 COPY . .
 RUN npm run build
 
 FROM node:20-alpine AS production
 WORKDIR /app
+ENV NODE_ENV=production
 COPY package*.json ./
-RUN npm run install --omit=dev
+RUN npm install --omit=dev
 COPY --from=builder /app/dist ./dist
 EXPOSE 3000
 CMD ["node", "dist/index.js"]
