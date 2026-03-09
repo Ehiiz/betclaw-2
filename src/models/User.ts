@@ -2,19 +2,19 @@ import mongoose, { Document, Schema } from 'mongoose'
 import bcrypt from 'bcryptjs'
 
 export interface IUser extends Document {
-  email:        string
+  email: string
   passwordHash: string
-  displayName:  string
-  createdAt:    Date
-  updatedAt:    Date
+  displayName: string
+  createdAt: Date
+  updatedAt: Date
   comparePassword(candidate: string): Promise<boolean>
 }
 
 const UserSchema = new Schema<IUser>(
   {
-    email:        { type: String, required: true, unique: true, lowercase: true, trim: true, index: true },
+    email: { type: String, required: true, unique: true, lowercase: true, trim: true, index: true },
     passwordHash: { type: String, required: true },
-    displayName:  { type: String, required: true, trim: true },
+    displayName: { type: String, required: true, trim: true },
   },
   { timestamps: true }
 )
@@ -32,7 +32,7 @@ UserSchema.methods.comparePassword = async function (candidate: string): Promise
 
 // Never expose password hash in JSON responses
 UserSchema.set('toJSON', {
-  transform: (_doc, ret: Record<string, unknown>) => {
+  transform: (_doc: any, ret: any) => {
     delete ret['passwordHash']
     return ret
   },
