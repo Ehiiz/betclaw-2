@@ -55,8 +55,6 @@ export interface ProcessedFixture {
   homeTeamId: number
   awayTeamId: number
   league: string
-  leagueId: number      // ADD THIS
-  country: string
   kickoffTime: Date
   odds: {
     home: number
@@ -69,72 +67,43 @@ export interface ProcessedFixture {
   }
 }
 
-// ─── Top league IDs on api-sports.io ──────────────────────────────────────────
-// These get a slight confidence boost in curation scoring
-const TOP_LEAGUE_IDS = new Set([
-  39,   // Premier League
-  140,  // La Liga
-  78,   // Bundesliga
-  135,  // Serie A
-  61,   // Ligue 1
-  2,    // Champions League
-  3,    // Europa League
-  848,  // Conference League
-  94,   // Primeira Liga
-  88,   // Eredivisie
-])
 
-// ─── Synthetic odds model ─────────────────────────────────────────────────────
-// Since the free plan has no odds data, we generate plausible odds from
-// league tier and a base home-advantage model. Real odds can replace this later.
-function generateSyntheticOdds(leagueId: number): ProcessedFixture['odds'] {
-  // Add slight randomness so every fixture isn't identical
-  const r = () => 0.85 + Math.random() * 0.30   // multiplier 0.85–1.15
-
-  const isTop = TOP_LEAGUE_IDS.has(leagueId)
-
-  // Base odds — home advantage model
-  // Top leagues: more competitive, draw odds lower, closer home/away
-  const home = isTop ? +(1.80 * r()).toFixed(2) : +(2.10 * r()).toFixed(2)
-  const draw = isTop ? +(3.40 * r()).toFixed(2) : +(3.20 * r()).toFixed(2)
-  const away = isTop ? +(4.20 * r()).toFixed(2) : +(3.80 * r()).toFixed(2)
-  const bttsYes = +(1.75 * r()).toFixed(2)
-  const bttsNo = +(2.05 * r()).toFixed(2)
-  const over25 = +(1.85 * r()).toFixed(2)
-  const under25 = +(1.95 * r()).toFixed(2)
-
-  // Ensure minimum odds of 1.10
-  const floor = (n: number) => Math.max(1.10, n)
-
-  return {
-    home: floor(home),
-    draw: floor(draw),
-    away: floor(away),
-    bttsYes: floor(bttsYes),
-    bttsNo: floor(bttsNo),
-    over25: floor(over25),
-    under25: floor(under25),
-  }
-}
 
 // ─── Fetch upcoming fixtures ──────────────────────────────────────────────────
 export async function fetchUpcomingFixtures(windowHours = env.FIXTURE_WINDOW_HOURS): Promise<ProcessedFixture[]> {
   const now = new Date()
   const to = new Date(Date.now() + windowHours * 60 * 60 * 1000)
-  const fromStr = now.toISOString().split('T')[0]
 
-  logger.info({ date: fromStr, windowHours }, 'Fetching upcoming fixtures')
+  // Fetch today AND tomorrow to avoid missing late-evening fixtures
+  const todayStr = now.toISOString().split('T')[0]
+  const tomorrow = new Date(now); tomorrow.setDate(tomorrow.getDate() + 1)
+  const tomorrowStr = tomorrow.toISOString().split('T')[0]
+
+  logger.info({ today: todayStr, tomorrow: tomorrowStr, windowHours }, 'Fetching upcoming fixtures')
 
   try {
-    const fixturesRaw = await apiFetchRaw(`/fixtures?date=${fromStr}`)
+    // Fetch both dates in parallel
+    const [todayRaw, tomorrowRaw] = await Promise.all([
+      apiFetchRaw(`/fixtures?date=${todayStr}`),
+      apiFetchRaw(`/fixtures?date=${tomorrowStr}`),
+    ])
 
     logger.info({
-      results: fixturesRaw.results,
-      errors: fixturesRaw.errors,
-      firstRecord: fixturesRaw.response?.[0]?.fixture ?? 'EMPTY',
+      todayResults: todayRaw.results,
+      tomorrowResults: tomorrowRaw.results,
     }, '=== RAW FIXTURES RESPONSE ===')
 
-    const fixtures: ApiFixture[] = fixturesRaw.response ?? []
+    const allFixtures: ApiFixture[] = [
+      ...(todayRaw.response ?? []),
+      ...(tomorrowRaw.response ?? []),
+    ]
+
+    // Deduplicate by fixture ID (in case a fixture appears in both)
+    const seen = new Set<number>()
+    const fixtures = allFixtures.filter(f => {
+      if (seen.has(f.fixture.id)) return false
+      seen.add(f.fixture.id); return true
+    })
 
     let skippedStarted = 0
     const processed: ProcessedFixture[] = []
@@ -146,8 +115,6 @@ export async function fetchUpcomingFixtures(windowHours = env.FIXTURE_WINDOW_HOU
       if (kickoffTime <= now) { skippedStarted++; continue }
       if (kickoffTime > to) { continue }
 
-      // Odds will be enriched in curationEngine via The Odds API
-      // Placeholder zeros here — curation engine overwrites with real/synthetic odds
       processed.push({
         fixtureId: String(f.fixture.id),
         homeTeam: f.teams.home.name,
@@ -155,17 +122,16 @@ export async function fetchUpcomingFixtures(windowHours = env.FIXTURE_WINDOW_HOU
         homeTeamId: f.teams.home.id,
         awayTeamId: f.teams.away.id,
         league: f.league.name,
-        leagueId: f.league.id,
-        country: f.league.country,
         kickoffTime,
         odds: { home: 0, draw: 0, away: 0, bttsYes: 0, bttsNo: 0, over25: 0, under25: 0 },
       })
     }
 
     logger.info({
-      total: fixtures.length,
+      totalFetched: fixtures.length,
       skippedStarted,
       upcoming: processed.length,
+      leagues: [...new Set(processed.map(f => f.league))].slice(0, 10),
       sample: processed[0] ? `${processed[0].homeTeam} vs ${processed[0].awayTeam} (${processed[0].league})` : 'none',
     }, 'Fixture processing complete')
 

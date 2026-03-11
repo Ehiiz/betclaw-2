@@ -5,7 +5,7 @@ import { BetSlip } from '../models/BetSlip'
 import { SlipGame } from '../models/SlipGame'
 import { logger } from '../config/logger'
 import { fetchUpcomingFixtures, ProcessedFixture } from '../services/sportsApi'
-import { fetchOddsForDate, normaliseTeamKey, generateSyntheticOdds } from '../services/oddsApi'
+import { fetchOddsForDate, normaliseTeamKey } from '../services/oddsApi'
 import { runVerdictEngine, SlipForVerdict } from './verdictEngine'
 import { calculateStakes } from './stakingEngine'
 import { TEMPERAMENT_CONFIG, FixtureScore, PredictionType, Temperament, SlipStatus } from '../types'
@@ -46,11 +46,7 @@ export async function runCurationEngine(
     return
   }
 
-  const filteredFixtures = fixtures.filter(f => ALLOWED_LEAGUE_IDS.has(f.leagueId))
-  if (filteredFixtures.length === 0) {
-    logger.warn({ sessionId: session._id }, 'No fixtures from allowed leagues')
-    return
-  }
+  const filteredFixtures = fixtures;
 
   logger.info({
     total: fixtures.length,

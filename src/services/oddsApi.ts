@@ -156,18 +156,4 @@ export function normaliseTeamKey(home: string, away: string): string {
   return `${home.toLowerCase().trim()}|${away.toLowerCase().trim()}`
 }
 
-export function generateSyntheticOdds(league: string): ExtractedOdds {
-  const TOP = new Set(['Premier League', 'La Liga', 'Bundesliga', 'Serie A', 'Ligue 1', 'UEFA Champions League', 'Europa League', 'Championship', 'Eredivisie', 'Primeira Liga'])
-  const r = () => 0.88 + Math.random() * 0.24
-  const isTop = TOP.has(league)
-  const f = (n: number) => +Math.max(1.10, n).toFixed(2)
-  return {
-    home: f((isTop ? 1.80 : 2.10) * r()),
-    draw: f(3.30 * r()),
-    away: f((isTop ? 4.00 : 3.60) * r()),
-    bttsYes: f(1.75 * r()),
-    bttsNo: f(2.05 * r()),
-    over25: f(1.85 * r()),
-    under25: f(1.95 * r()),
-  }
-}
+
