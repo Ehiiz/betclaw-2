@@ -5,12 +5,14 @@ const BASE_URL = 'https://api.the-odds-api.com/v4'
 
 // Sport-specific keys required by The Odds API — generic 'soccer' is NOT valid
 const SOCCER_SPORT_KEYS = [
-  'soccer_epl',                    // Premier League
-  'soccer_spain_la_liga',          // La Liga
-  'soccer_germany_bundesliga',     // Bundesliga
-  'soccer_italy_serie_a',          // Serie A
-  'soccer_turkey_super_league',    // Turkish Süper Lig
-  'soccer_england_efl_champ',      // Championship
+  'soccer_epl',
+  'soccer_england_efl_champ',
+  'soccer_germany_bundesliga',
+  'soccer_italy_serie_a',
+  'soccer_spain_la_liga',
+  'soccer_france_ligue_one',
+  'soccer_uefa_champs_league',
+  'soccer_uefa_europa_league',
 ]
 
 export interface OddsGame {
