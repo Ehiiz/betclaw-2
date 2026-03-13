@@ -1,5 +1,5 @@
 {
-  "name": "betclaw",
+  "name": "betclaw-server",
   "version": "1.0.0",
   "description": "Autonomous Football Betting Intelligence System",
   "main": "dist/index.js",

@@ -117,34 +117,34 @@ export interface RecalibrationResult {
 
 export const TEMPERAMENT_CONFIG: Record<Temperament, TemperamentConfig> = {
   [Temperament.CONSERVATIVE]: {
-    slipsMin: 2, slipsMax: 3,
+    slipsMin: 2, slipsMax: 4,
     gamesPerSlipMin: 2, gamesPerSlipMax: 3,
-    oddsMin: 1.4, oddsMax: 3.0,   // was 1.5–2.5, widened to capture more fixtures
-    minFixtureScore: 30,            // was 40
+    oddsMin: 1.25, oddsMax: 3.6,
+    minFixtureScore: 18,
     allocationMin: 0.10, allocationMax: 0.15,
-    maxSlipStakePct: 0.30,
+    maxSlipStakePct: 0.34,
   },
   [Temperament.MODERATE]: {
-    slipsMin: 3, slipsMax: 4,
-    gamesPerSlipMin: 3, gamesPerSlipMax: 4,
-    oddsMin: 2.5, oddsMax: 6.0,
-    minFixtureScore: 30,   // was 55
+    slipsMin: 2, slipsMax: 4,
+    gamesPerSlipMin: 2, gamesPerSlipMax: 4,
+    oddsMin: 1.6, oddsMax: 7.5,
+    minFixtureScore: 16,
     allocationMin: 0.15, allocationMax: 0.25,
-    maxSlipStakePct: 0.45,
+    maxSlipStakePct: 0.48,
   },
   [Temperament.AGGRESSIVE]: {
     slipsMin: 4, slipsMax: 6,
-    gamesPerSlipMin: 4, gamesPerSlipMax: 6,
-    oddsMin: 6.0, oddsMax: 18.0,
-    minFixtureScore: 20,   // was 40
+    gamesPerSlipMin: 3, gamesPerSlipMax: 5,
+    oddsMin: 2.4, oddsMax: 20.0,
+    minFixtureScore: 12,
     allocationMin: 0.25, allocationMax: 0.40,
     maxSlipStakePct: 0.60,
   },
   [Temperament.RESTORATIVE]: {
     slipsMin: 2, slipsMax: 2,
     gamesPerSlipMin: 2, gamesPerSlipMax: 2,
-    oddsMin: 1.4, oddsMax: 2.0,
-    minFixtureScore: 45,   // was 80 — also unreachable
+    oddsMin: 1.2, oddsMax: 2.4,
+    minFixtureScore: 20,
     allocationMin: 0.08, allocationMax: 0.12,
     maxSlipStakePct: 0.25,
   },

@@ -7,6 +7,7 @@ import { BetTrack } from '../models/BetTrack'
 import { authenticate } from '../middleware/auth'
 import { AppError } from '../middleware/errorHandler'
 import { SessionStatus, PulseStatus, GameResult, SlipStatus } from '../types'
+import { getQueue } from '../workers/queues'
 
 // ─── Sessions ─────────────────────────────────────────────────────────────────
 export const sessionsRouter = Router()
@@ -58,6 +59,16 @@ sessionsRouter.post('/sessions/:id/cancel', async (req: Request, res: Response, 
 
     session.status = SessionStatus.CANCELLED
     await session.save()
+
+    const settlementQueue = getQueue('settlement')
+    for (const jobId of [session.settlementJobId, session.retryJobId].filter(Boolean) as string[]) {
+      try {
+        const job = await settlementQueue.getJob(jobId)
+        if (job) {
+          await job.remove()
+        }
+      } catch { /* job may already be gone */ }
+    }
 
     // Cancel all active pulse jobs for this session
     await PulseJob.updateMany(

@@ -12,6 +12,7 @@ export interface IBetSession extends Document {
   temperamentSnapshot:  Temperament
   status:               SessionStatus
   settlementJobId?:     string
+  retryJobId?:          string
   lastSettlementAttempt?: Date
   settledAt?:           Date
   createdAt:            Date
@@ -33,6 +34,7 @@ const BetSessionSchema = new Schema<IBetSession>(
     status:              { type: String, enum: Object.values(SessionStatus), default: SessionStatus.ACTIVE },
 
     settlementJobId:       { type: String },
+    retryJobId:            { type: String },
     lastSettlementAttempt: { type: Date },
     settledAt:             { type: Date },
   },

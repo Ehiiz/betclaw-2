@@ -146,14 +146,34 @@ export async function runCurationEngine(
   }, verdictModel)
 
   // Filter and adjust based on verdicts
-  const approvedGroups = slipGroups.filter((_, i) => {
+  let approvedGroups = slipGroups.filter((_, i) => {
     const v = verdicts.get(i)
     return v?.verdict !== 'skip'
   })
 
   if (approvedGroups.length === 0) {
-    logger.warn({ sessionId: session._id }, 'All slips skipped by Verdict Engine')
-    return
+    const rescuedGroup = slipGroups[0]
+    const rescuedVerdict = verdicts.get(0)
+
+    if (!rescuedGroup || !rescuedVerdict) {
+      logger.warn({ sessionId: session._id }, 'All slips skipped by Verdict Engine')
+      return
+    }
+
+    verdicts.set(0, {
+      ...rescuedVerdict,
+      verdict: 'reduce',
+      confidence: Math.max(rescuedVerdict.confidence, 55),
+      reasoning: 'All slips were filtered out, so BetClaw is retrying with the strongest slip at reduced stake.',
+      analysis: {
+        ...rescuedVerdict.analysis,
+        recommendation: 'Proceed at reduced stake while preserving session continuity.',
+        flags: Array.from(new Set([...(rescuedVerdict.analysis.flags ?? []), 'rescued'])),
+      },
+    })
+
+    approvedGroups.push(rescuedGroup)
+    logger.info({ sessionId: session._id }, 'Rescued strongest slip after all AI verdicts skipped')
   }
 
   // Recalculate stakes for approved slips only
@@ -330,16 +350,17 @@ function scoreFixtures(fixtures: ProcessedFixture[], temperament: Temperament): 
 
     // Hard enforce: individual game odds must be within a sane range
     // Max single-game odds depends on temperament — prevents runaway accumulators
-    const maxSingleOdds = temperament === 'conservative' ? 3.0
-      : temperament === 'moderate' ? 5.0
-        : temperament === 'aggressive' ? 9.0
-          : 2.5  // restorative
+    const maxSingleOdds = temperament === 'conservative' ? 4.5
+      : temperament === 'moderate' ? 7.5
+        : temperament === 'aggressive' ? 12.0
+          : 3.0
 
     if (odds > maxSingleOdds) return null
 
     const oddsScore = scoreOdds(odds, config.oddsMin, config.oddsMax)
     const leagueBonus = LEAGUE_TIER_BONUS[f.league] ?? 0
-    const score = (oddsScore * 0.70) + (leagueBonus * 3)
+    const marketFitBonus = odds >= config.oddsMin && odds <= config.oddsMax ? 18 : 8
+    const score = (oddsScore * 0.55) + (leagueBonus * 4) + marketFitBonus
 
     // In scoreFixtures, after calculating score:
     logger.debug({
@@ -375,6 +396,8 @@ function pickBestPrediction(
     { type: PredictionType.AWAY_WIN, odds: odds.away },
     { type: PredictionType.BTTS_YES, odds: odds.bttsYes },
     { type: PredictionType.BTTS_NO, odds: odds.bttsNo },
+    { type: PredictionType.OVER_15, odds: Math.max(1.1, (odds.over25 || 0) - 0.28) },
+    { type: PredictionType.UNDER_15, odds: Math.max(1.1, (odds.under25 || 0) - 0.22) },
     { type: PredictionType.OVER_25, odds: odds.over25 },
     { type: PredictionType.UNDER_25, odds: odds.under25 },
   ].filter(c => c.odds > 1.05)

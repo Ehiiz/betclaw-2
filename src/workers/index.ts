@@ -1,6 +1,7 @@
 import { Worker, Job } from 'bullmq'
 import { logger } from '../config/logger'
 import { settleSession, checkGameResult, tryFinaliseSession } from '../engines/settlementEngine'
+import { retryPendingSessionCuration } from '../engines/trackLoop'
 import { PulseJob } from '../models/PulseJob'
 import { PulseStatus } from '../types'
 import { getConnectionOpts } from './queues'
@@ -12,7 +13,13 @@ export function createSettlementWorker(): Worker {
     'settlement',
     async (job: Job) => {
       const { sessionId } = job.data
-      logger.info({ sessionId, jobId: job.id }, 'Settlement worker: processing')
+      logger.info({ sessionId, jobId: job.id, jobName: job.name }, 'Settlement worker: processing')
+
+      if (job.name === 'retry-curation') {
+        await retryPendingSessionCuration(sessionId)
+        return
+      }
+
       await settleSession(sessionId)
     },
     {

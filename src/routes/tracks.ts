@@ -179,6 +179,13 @@ router.patch('/:id/pause', async (req: Request, res: Response, next: NextFunctio
         } catch { /* job may already be gone */ }
       }
 
+      if (session.retryJobId) {
+        try {
+          const retryJob = await settlementQueue.getJob(session.retryJobId)
+          if (retryJob) { await retryJob.remove(); cancelledJobs++ }
+        } catch { /* job may already be gone */ }
+      }
+
       // Cancel all active pulse jobs for this session
       const pulseJobs = await PulseJob.find({ sessionId: session._id, status: PulseStatus.ACTIVE })
       for (const pulse of pulseJobs) {
