@@ -1,16 +1,30 @@
-FROM node:20-alpine AS builder
-# BetClaw production build v1.1
+FROM node:20-alpine AS base
 WORKDIR /app
-COPY package*.json ./
-RUN npm install
-COPY . .
+
+FROM base AS deps
+COPY package.json package-lock.json ./
+RUN npm ci
+
+FROM deps AS builder
+COPY tsconfig.json ./
+COPY src ./src
 RUN npm run build
 
-FROM node:20-alpine AS production
+FROM base AS production-deps
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+
+FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
-COPY package*.json ./
-RUN npm install --omit=dev
+ENV PORT=8080
+
+COPY --from=production-deps /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
-EXPOSE 3000
+COPY package.json package-lock.json ./
+
+USER node
+
+EXPOSE 8080
+
 CMD ["node", "dist/index.js"]
