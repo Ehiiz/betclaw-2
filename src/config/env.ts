@@ -6,6 +6,8 @@ dotenv.config()
 const envSchema = z.object({
   PORT:                  z.string().default('3000'),
   NODE_ENV:              z.enum(['development', 'production', 'test']).default('development'),
+  DEPLOY_BRANCH:         z.string().optional().default(''),
+  DEPLOY_COMMIT:         z.string().optional().default(''),
   MONGODB_URI:           z.string().min(1, 'MONGODB_URI is required'),
   REDIS_URL:             z.string().min(1, 'REDIS_URL is required'),
   JWT_SECRET:            z.string().min(16, 'JWT_SECRET must be at least 16 characters'),

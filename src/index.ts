@@ -48,7 +48,17 @@ app.use('/v1', pulsesRouter)
 
 // Health check
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() })
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    environment: env.NODE_ENV,
+    deploy: {
+      branch: env.DEPLOY_BRANCH || 'unknown',
+      commit: env.DEPLOY_COMMIT || 'unknown',
+      service: process.env.K_SERVICE || 'local',
+      revision: process.env.K_REVISION || 'local',
+    },
+  })
 })
 
 // ─── Error handler (must be last) ─────────────────────────────────────────────
