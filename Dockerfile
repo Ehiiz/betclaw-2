@@ -1,5 +1,6 @@
 FROM node:20-alpine AS base
 WORKDIR /app
+RUN npm install -g npm@11.7.0
 
 FROM base AS deps
 COPY package.json package-lock.json ./
