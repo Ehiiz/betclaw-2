@@ -1,5 +1,7 @@
 import { env } from '../config/env'
 import { logger } from '../config/logger'
+import type { ProcessedFixture } from './sportsApi'
+import { buildSyntheticFixtures } from './syntheticFixtures'
 
 const BASE_URL = 'https://api.the-odds-api.com/v4'
 
@@ -14,6 +16,17 @@ const SOCCER_SPORT_KEYS = [
   'soccer_uefa_champs_league',
   'soccer_uefa_europa_league',
 ]
+
+const SPORT_KEY_TO_LEAGUE: Record<string, string> = {
+  soccer_epl: 'Premier League',
+  soccer_england_efl_champ: 'Championship',
+  soccer_germany_bundesliga: 'Bundesliga',
+  soccer_italy_serie_a: 'Serie A',
+  soccer_spain_la_liga: 'La Liga',
+  soccer_france_ligue_one: 'Ligue 1',
+  soccer_uefa_champs_league: 'UEFA Champions League',
+  soccer_uefa_europa_league: 'UEFA Europa League',
+}
 
 export interface OddsGame {
   id: string
@@ -123,6 +136,59 @@ export async function fetchOddsForDate(): Promise<Map<string, ExtractedOdds>> {
   return oddsMap
 }
 
+export async function fetchUpcomingOddsFixtures(windowHours = 48): Promise<ProcessedFixture[]> {
+  if (!env.ODDS_API_KEY) {
+    logger.warn('ODDS_API_KEY not set — skipping odds fixture fallback')
+    return []
+  }
+
+  const now = Date.now()
+  const cutoff = now + windowHours * 60 * 60 * 1000
+  const fixtures: ProcessedFixture[] = []
+  const seen = new Set<string>()
+
+  for (const sportKey of SOCCER_SPORT_KEYS) {
+    try {
+      const url = `${BASE_URL}/sports/${sportKey}/odds/?apiKey=${env.ODDS_API_KEY}&regions=uk&markets=h2h,totals,btts&oddsFormat=decimal`
+      const res = await fetch(url)
+      if (!res.ok) {
+        logger.warn({ sportKey, status: res.status }, 'Odds fixture fallback skipped for league')
+        continue
+      }
+
+      const games: OddsGame[] = await res.json() as OddsGame[]
+      for (const game of games) {
+        const kickoff = new Date(game.commence_time).getTime()
+        if (kickoff <= now || kickoff > cutoff) {
+          continue
+        }
+
+        const key = normaliseTeamKey(game.home_team, game.away_team)
+        if (seen.has(key)) {
+          continue
+        }
+        seen.add(key)
+
+        fixtures.push({
+          fixtureId: game.id,
+          homeTeam: game.home_team,
+          awayTeam: game.away_team,
+          homeTeamId: 0,
+          awayTeamId: 0,
+          league: SPORT_KEY_TO_LEAGUE[game.sport_key] ?? game.sport_key,
+          kickoffTime: new Date(game.commence_time),
+          odds: extractOddsFromGame(game),
+        })
+      }
+    } catch (err) {
+      logger.warn({ err, sportKey }, 'Failed to fetch odds fixtures for fallback')
+    }
+  }
+
+  logger.info({ count: fixtures.length }, 'Odds fixture fallback complete')
+  return fixtures
+}
+
 function extractOddsFromGame(game: OddsGame): ExtractedOdds {
   const result: ExtractedOdds = { home: 0, draw: 0, away: 0, bttsYes: 0, bttsNo: 0, over25: 0, under25: 0 }
   const bookmaker = game.bookmakers.find(b => b.key === 'bet365') ?? game.bookmakers[0]
@@ -155,5 +221,4 @@ function extractOddsFromGame(game: OddsGame): ExtractedOdds {
 export function normaliseTeamKey(home: string, away: string): string {
   return `${home.toLowerCase().trim()}|${away.toLowerCase().trim()}`
 }
-
-
+export { buildSyntheticFixtures }

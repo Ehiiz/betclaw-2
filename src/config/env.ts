@@ -17,6 +17,8 @@ const envSchema = z.object({
   GEMINI_API_KEY:        z.string().default(''),
   MIN_STAKE:             z.string().transform(Number).default('500'),
   FIXTURE_WINDOW_HOURS:  z.string().transform(Number).default('48'),
+  USE_SYNTHETIC_FIXTURES: z.string().optional().transform((value) => value === 'true'),
+  RUN_WORKERS_IN_API:    z.string().optional().transform((value) => value !== 'false'),
 })
 
 const parsed = envSchema.safeParse(process.env)

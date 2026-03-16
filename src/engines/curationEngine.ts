@@ -4,6 +4,7 @@ import { IBetSession } from '../models/BetSession'
 import { BetSlip } from '../models/BetSlip'
 import { SlipGame } from '../models/SlipGame'
 import { logger } from '../config/logger'
+import { env } from '../config/env'
 import { fetchUpcomingFixtures, ProcessedFixture } from '../services/sportsApi'
 import { fetchOddsForDate, normaliseTeamKey } from '../services/oddsApi'
 import { runVerdictEngine, SlipForVerdict } from './verdictEngine'
@@ -53,30 +54,18 @@ export async function runCurationEngine(
     filtered: filteredFixtures.length,
     leagues: [...ALLOWED_LEAGUE_IDS]
   }, 'Fixtures filtered to allowed leagues')
-  // ── Step 2: Enrich with real odds (Odds API) with synthetic fallback ──────
-  logger.info('Fetching real odds from The Odds API...')
-  const oddsMap = await fetchOddsForDate()
-  logger.info({ realOddsCount: oddsMap.size }, 'Odds map built')
-
-  // Every fixture gets odds — real only, skip if not available
-  const enrichedFixtures: ProcessedFixture[] = filteredFixtures
-    .map(f => {
-      const key = normaliseTeamKey(f.homeTeam, f.awayTeam)
-      const realOdds = oddsMap.get(key)
-      if (realOdds && realOdds.home > 1) {
-        logger.debug({ fixture: `${f.homeTeam} vs ${f.awayTeam}` }, 'Using real odds')
-        return { ...f, odds: realOdds }
-      }
-      logger.debug({ fixture: `${f.homeTeam} vs ${f.awayTeam}` }, 'No real odds — skipping fixture')
-      return null
-    })
-    .filter(Boolean) as ProcessedFixture[]
+  // ── Step 2: Enrich with real odds, unless dev mode is forcing synthetic data ──
+  const useFixtureOddsDirectly = env.USE_SYNTHETIC_FIXTURES || env.NODE_ENV === 'development'
+  const enrichedFixtures: ProcessedFixture[] = useFixtureOddsDirectly
+    ? filteredFixtures.filter((fixture) => fixture.odds.home > 1 && fixture.odds.away > 1)
+    : await enrichFixturesWithLiveOdds(filteredFixtures)
 
   logger.info({
     total: filteredFixtures.length,
-    realOdds: enrichedFixtures.length,
+    enriched: enrichedFixtures.length,
     skipped: filteredFixtures.length - enrichedFixtures.length,
-  }, 'Odds enrichment complete — synthetic odds disabled')
+    source: useFixtureOddsDirectly ? 'fixture_odds' : 'odds_api',
+  }, 'Odds enrichment complete')
 
   // ── Step 3: Score fixtures ─────────────────────────────────────────────────
   const scored = scoreFixtures(enrichedFixtures, temperament)
@@ -95,6 +84,14 @@ export async function runCurationEngine(
   const slipCount = randomBetween(config.slipsMin, config.slipsMax)
   const gamesPerSlip = randomBetween(config.gamesPerSlipMin, config.gamesPerSlipMax)
   const selected = qualified.slice(0, slipCount * gamesPerSlip)
+
+  logger.info({
+    sessionId: session._id,
+    qualified: qualified.length,
+    slipCount,
+    gamesPerSlip,
+    selected: selected.length,
+  }, 'Slip assembly targets selected')
 
   const slipGroups: FixtureScore[][] = []
   for (let i = 0; i < slipCount; i++) {
@@ -339,6 +336,25 @@ export async function runCurationEngine(
     totalStaked: session.totalStaked,
     settlementAt: latestSettlementTime,
   }, 'Curation complete')
+}
+
+async function enrichFixturesWithLiveOdds(filteredFixtures: ProcessedFixture[]): Promise<ProcessedFixture[]> {
+  logger.info('Fetching real odds from The Odds API...')
+  const oddsMap = await fetchOddsForDate()
+  logger.info({ realOddsCount: oddsMap.size }, 'Odds map built')
+
+  return filteredFixtures
+    .map((fixture) => {
+      const key = normaliseTeamKey(fixture.homeTeam, fixture.awayTeam)
+      const realOdds = oddsMap.get(key)
+      if (realOdds && realOdds.home > 1) {
+        logger.debug({ fixture: `${fixture.homeTeam} vs ${fixture.awayTeam}` }, 'Using real odds')
+        return { ...fixture, odds: realOdds }
+      }
+      logger.debug({ fixture: `${fixture.homeTeam} vs ${fixture.awayTeam}` }, 'No real odds — skipping fixture')
+      return null
+    })
+    .filter(Boolean) as ProcessedFixture[]
 }
 
 // ─── Fixture scoring ──────────────────────────────────────────────────────────

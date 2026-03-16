@@ -15,6 +15,7 @@ import { startWorkers } from './workers'
 import authRouter from './routes/auth'
 import tracksRouter from './routes/tracks'
 import { sessionsRouter, slipsRouter, pulsesRouter } from './routes/sessions'
+import liveRouter from './routes/live'
 import { env } from './config/env'
 
 const app = express()
@@ -40,6 +41,7 @@ app.get('/docs.json', (_req, res) => res.json(swaggerSpec))
 // ─── Routes ───────────────────────────────────────────────────────────────────
 app.use('/v1/auth', authRouter)
 app.use('/v1/tracks', tracksRouter)
+app.use('/v1/live', liveRouter)
 app.use('/v1', sessionsRouter)
 app.use('/v1', slipsRouter)
 app.use('/v1', pulsesRouter)
@@ -55,7 +57,11 @@ app.use(errorHandler)
 // ─── Bootstrap ───────────────────────────────────────────────────────────────
 async function bootstrap(): Promise<void> {
   await connectDB()
-  await startWorkers()
+  if (env.RUN_WORKERS_IN_API) {
+    await startWorkers()
+  } else {
+    logger.info('Skipping worker startup in API process')
+  }
 
   const server = app.listen(Number(env.PORT), () => {
     logger.info(`🚀  BetClaw API running on port ${env.PORT} [${env.NODE_ENV}]`)

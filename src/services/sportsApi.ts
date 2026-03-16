@@ -2,6 +2,7 @@ import { env } from '../config/env'
 import { FixtureCache } from '../models/FixtureCache'
 import { logger } from '../config/logger'
 import { PredictionType } from '../types'
+import { buildSyntheticFixtures } from './syntheticFixtures'
 
 const BASE_URL = `https://${env.SPORTS_API_HOST}`
 
@@ -9,6 +10,10 @@ const headers: Record<string, string> = {
   'x-apisports-key': env.SPORTS_API_KEY,
   'Content-Type': 'application/json',
 }
+
+const teamFormCache = new Map<string, { expiresAt: number; value: ApiTeamForm | null }>()
+const h2hCache = new Map<string, { expiresAt: number; value: ApiFixture[] }>()
+const CACHE_TTL_MS = 15 * 60 * 1000
 
 // ── Raw fetch ─────────────────────────────────────────────────────────────────
 async function apiFetchRaw(path: string): Promise<any> {
@@ -71,6 +76,11 @@ export interface ProcessedFixture {
 
 // ─── Fetch upcoming fixtures ──────────────────────────────────────────────────
 export async function fetchUpcomingFixtures(windowHours = env.FIXTURE_WINDOW_HOURS): Promise<ProcessedFixture[]> {
+  if (env.USE_SYNTHETIC_FIXTURES || env.NODE_ENV === 'development') {
+    logger.info({ windowHours }, 'Using synthetic fixtures in non-production mode')
+    return buildSyntheticFixtures([], windowHours)
+  }
+
   const now = new Date()
   const to = new Date(Date.now() + windowHours * 60 * 60 * 1000)
 
@@ -145,23 +155,53 @@ export async function fetchUpcomingFixtures(windowHours = env.FIXTURE_WINDOW_HOU
 
 // ─── Fetch team form ──────────────────────────────────────────────────────────
 export async function fetchTeamForm(teamId: number, last = 5): Promise<ApiTeamForm | null> {
+  const cacheKey = `${teamId}:${last}`
+  const cached = teamFormCache.get(cacheKey)
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value
+  }
+
+  const seasons = candidateSeasons()
+
   try {
-    const data = await apiFetch<ApiTeamForm>(
-      `/teams/statistics?team=${teamId}&season=${getCurrentSeason()}&last=${last}`
-    )
-    return data[0] ?? null
+    for (const season of seasons) {
+      try {
+        const data = await apiFetch<ApiTeamForm>(`/teams/statistics?team=${teamId}&season=${season}`)
+        const value = data[0] ?? null
+        teamFormCache.set(cacheKey, { expiresAt: Date.now() + CACHE_TTL_MS, value })
+        return value
+      } catch (err) {
+        if (isPlanError(err) || isRateLimitError(err)) {
+          logger.warn({ err, teamId, season }, 'Team form fallback attempt failed')
+          continue
+        }
+        throw err
+      }
+    }
   } catch (err) {
     logger.warn({ err, teamId }, 'Could not fetch team form')
-    return null
   }
+
+  teamFormCache.set(cacheKey, { expiresAt: Date.now() + CACHE_TTL_MS, value: null })
+  return null
 }
 
 // ─── Fetch H2H ────────────────────────────────────────────────────────────────
 export async function fetchH2H(homeId: number, awayId: number, last = 5): Promise<ApiFixture[]> {
+  const cacheKey = `${homeId}:${awayId}:${last}`
+  const cached = h2hCache.get(cacheKey)
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value
+  }
+
   try {
-    return await apiFetch<ApiFixture>(`/fixtures/headtohead?h2h=${homeId}-${awayId}&last=${last}`)
+    const fixtures = await apiFetch<ApiFixture>(`/fixtures/headtohead?h2h=${homeId}-${awayId}`)
+    const value = fixtures.slice(0, last)
+    h2hCache.set(cacheKey, { expiresAt: Date.now() + CACHE_TTL_MS, value })
+    return value
   } catch (err) {
     logger.warn({ err, homeId, awayId }, 'Could not fetch H2H')
+    h2hCache.set(cacheKey, { expiresAt: Date.now() + CACHE_TTL_MS, value: [] })
     return []
   }
 }
@@ -230,4 +270,17 @@ export function evaluatePrediction(
 function getCurrentSeason(): number {
   const now = new Date()
   return now.getMonth() >= 7 ? now.getFullYear() : now.getFullYear() - 1
+}
+
+function candidateSeasons(): number[] {
+  const current = getCurrentSeason()
+  return Array.from(new Set([current, 2024, 2023, 2022]))
+}
+
+function isPlanError(err: unknown): boolean {
+  return err instanceof Error && err.message.includes('"plan"')
+}
+
+function isRateLimitError(err: unknown): boolean {
+  return err instanceof Error && err.message.includes('"rateLimit"')
 }
