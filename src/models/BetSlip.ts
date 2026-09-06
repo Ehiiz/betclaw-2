@@ -1,5 +1,6 @@
 import mongoose, { Document, Schema, Types } from 'mongoose'
 import { SlipStatus } from '../types'
+import { VerdictModel, VERDICT_PROVIDERS } from '../engines/verdictEngine'
 
 export interface IBetSlip extends Document {
   sessionId:         Types.ObjectId
@@ -15,7 +16,9 @@ export interface IBetSlip extends Document {
   settledAt?:        Date
   // Verdict Engine fields
   verdict:           'bet' | 'skip' | 'reduce'
-  verdictModel:      'gemini' | 'gpt-4o' | 'none'
+  verdictModel:      VerdictModel
+  verdictModelId:    string
+  verdictModelLabel: string
   verdictConfidence: number
   verdictReasoning:  string
   verdictAnalysis: {
@@ -61,7 +64,9 @@ const BetSlipSchema = new Schema<IBetSlip>(
 
     // Verdict Engine
     verdict:           { type: String, enum: ['bet', 'skip', 'reduce'], default: 'bet' },
-    verdictModel:      { type: String, enum: ['gemini', 'gpt-4o', 'none'], default: 'none' },
+    verdictModel:      { type: String, enum: [...VERDICT_PROVIDERS, 'none'], default: 'none' },
+    verdictModelId:    { type: String, default: '' },
+    verdictModelLabel: { type: String, default: 'System' },
     verdictConfidence: { type: Number, default: 50 },
     verdictReasoning:  { type: String, default: '' },
     verdictAnalysis:   { type: AnalysisSchema, default: () => ({}) },

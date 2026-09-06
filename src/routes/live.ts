@@ -406,6 +406,8 @@ router.post('/create-slip', validate(createSlipSchema), async (req: Request, res
       ),
       verdict: verdict?.verdict ?? 'bet',
       verdictModel: verdict?.model ?? 'none',
+      verdictModelId: verdict?.modelId ?? '',
+      verdictModelLabel: verdict?.modelLabel ?? 'System',
       verdictConfidence: verdict?.confidence ?? avgConfidence,
       verdictReasoning: verdict?.reasoning ?? 'Created from approved live dossiers.',
       verdictAnalysis: verdict?.analysis,

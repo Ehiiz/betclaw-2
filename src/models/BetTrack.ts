@@ -1,5 +1,6 @@
 import mongoose, { Document, Schema, Types } from 'mongoose'
 import { Temperament, TrackStatus, DurationType } from '../types'
+import { VerdictProvider, VERDICT_PROVIDERS } from '../engines/verdictEngine'
 
 export interface IBetTrack extends Document {
   userId:               Types.ObjectId
@@ -9,7 +10,7 @@ export interface IBetTrack extends Document {
   target:               number
   startingTemperament:  Temperament
   currentTemperament:   Temperament
-  verdictModel:         'gemini' | 'gpt-4o'
+  verdictModel:         VerdictProvider
   duration:             { type: DurationType; value: number }
   status:               TrackStatus
   sessionCount:         number
@@ -42,7 +43,7 @@ const BetTrackSchema = new Schema<IBetTrack>(
     },
     verdictModel: {
       type:    String,
-      enum:    ['gemini', 'gpt-4o'],
+      enum:    VERDICT_PROVIDERS,
       default: 'gemini',
     },
 

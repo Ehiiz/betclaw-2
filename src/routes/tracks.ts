@@ -18,7 +18,7 @@ const createTrackSchema = z.object({
   budget:      z.number().positive('Budget must be positive'),
   target:      z.number().positive('Target must be positive'),
   temperament: z.enum([Temperament.CONSERVATIVE, Temperament.MODERATE, Temperament.AGGRESSIVE]),
-  verdictModel: z.enum(['gemini', 'gpt-4o']).default('gemini'),
+  verdictModel: z.enum(['gemini', 'gpt-4o', 'groq', 'claude']).default('gemini'),
   duration: z.object({
     type:  z.enum([DurationType.DAYS, DurationType.SESSIONS]),
     value: z.number().int().positive(),

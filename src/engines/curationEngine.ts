@@ -7,7 +7,7 @@ import { logger } from '../config/logger'
 import { env } from '../config/env'
 import { fetchUpcomingFixtures, ProcessedFixture } from '../services/sportsApi'
 import { fetchOddsForDate, normaliseTeamKey } from '../services/oddsApi'
-import { runVerdictEngine, SlipForVerdict } from './verdictEngine'
+import { runVerdictEngine, SlipForVerdict, VerdictProvider } from './verdictEngine'
 import { calculateStakes } from './stakingEngine'
 import { TEMPERAMENT_CONFIG, FixtureScore, PredictionType, Temperament, SlipStatus } from '../types'
 
@@ -33,7 +33,7 @@ export async function runCurationEngine(
   track: IBetTrack,
   session: IBetSession,
   allocation: number,
-  verdictModel: 'gemini' | 'gpt-4o' = 'gemini',
+  verdictModel: VerdictProvider = 'gemini',
 ): Promise<void> {
   const config = TEMPERAMENT_CONFIG[track.currentTemperament]
   const temperament = track.currentTemperament
@@ -133,7 +133,7 @@ export async function runCurationEngine(
     }
   })
 
-  // ── Step 7: Run GPT-4o Verdict Engine ────────────────────────────────────
+  // ── Step 7: Run the Verdict Engine on the selected analyst ───────────────
   const verdicts = await runVerdictEngine(slipsForVerdict, temperament, {
     budget: track.budget,
     remainingBudget: track.remainingBudget,
@@ -223,6 +223,8 @@ export async function runCurationEngine(
       status: isSkipped ? SlipStatus.VOID : SlipStatus.PENDING,
       verdict: verdict.verdict,
       verdictModel: verdict.model,
+      verdictModelId: verdict.modelId,
+      verdictModelLabel: verdict.modelLabel,
       verdictConfidence: verdict.confidence,
       verdictReasoning: verdict.reasoning,
       verdictAnalysis: verdict.analysis,
@@ -291,7 +293,10 @@ export async function runCurationEngine(
           lastSettlementTime: settlementTime,
           status: SlipStatus.PENDING,
           verdict: 'bet',
-          verdictModel: 'gemini',
+          // Assembled by the engine from reduction savings — no analyst ran on it
+          verdictModel: 'none',
+          verdictModelId: '',
+          verdictModelLabel: 'System',
           verdictConfidence: 60,
           verdictReasoning: `Bonus slip created from ₦${Math.floor(totalSaved)} saved via stake reduction on ${reducedSlips.length} slip(s).`,
           verdictAnalysis: { overview: 'Auto-generated bonus slip from reduction savings.', oddsAssessment: '', combinationRisk: '', leagueInsight: '', recommendation: '', keyRisks: [], keyStrengths: [], flags: ['bonus_slip'] },
