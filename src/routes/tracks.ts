@@ -3,7 +3,6 @@ import { z } from "zod";
 import { Types } from "mongoose";
 import { BetTrack } from "../models/BetTrack";
 import { BetSession } from "../models/BetSession";
-import { PulseJob } from "../models/PulseJob";
 import { authenticate } from "../middleware/auth";
 import { validate } from "../middleware/validate";
 import { AppError } from "../middleware/errorHandler";
@@ -12,9 +11,9 @@ import {
   TrackStatus,
   DurationType,
   SessionStatus,
-  PulseStatus,
 } from "../types";
 import { logger } from "../config/logger";
+import { cancelSessionJobs, purgeTrack } from "../engines/trackCleanup";
 
 const router = Router();
 router.use(authenticate);
@@ -207,12 +206,8 @@ router.patch(
       track.status = TrackStatus.PAUSED;
       await track.save();
 
-      // Cancel all active BullMQ settlement jobs for this track's sessions
-      const { getQueue } = await import("../workers/queues");
-      const settlementQueue = getQueue("settlement");
-      const pulseQueue = getQueue("pulse");
-
-      // Find all active/settling sessions for this track
+      // Drain every queued job for this track's live sessions. The sessions
+      // themselves stay put — they can resume.
       const activeSessions = await BetSession.find({
         trackId: track._id,
         status: {
@@ -224,55 +219,7 @@ router.patch(
         },
       });
 
-      let cancelledJobs = 0;
-      for (const session of activeSessions) {
-        // Cancel settlement job
-        if (session.settlementJobId) {
-          try {
-            const job = await settlementQueue.getJob(session.settlementJobId);
-            if (job) {
-              await job.remove();
-              cancelledJobs++;
-            }
-          } catch {
-            /* job may already be gone */
-          }
-        }
-
-        if (session.retryJobId) {
-          try {
-            const retryJob = await settlementQueue.getJob(session.retryJobId);
-            if (retryJob) {
-              await retryJob.remove();
-              cancelledJobs++;
-            }
-          } catch {
-            /* job may already be gone */
-          }
-        }
-
-        // Cancel all active pulse jobs for this session
-        const pulseJobs = await PulseJob.find({
-          sessionId: session._id,
-          status: PulseStatus.ACTIVE,
-        });
-        for (const pulse of pulseJobs) {
-          try {
-            const job = await pulseQueue.getJob(pulse.bullJobId);
-            if (job) {
-              await job.remove();
-              cancelledJobs++;
-            }
-          } catch {
-            /* job may already be gone */
-          }
-          pulse.status = PulseStatus.CANCELLED;
-          await pulse.save();
-        }
-
-        // Mark session as paused-state (keep as active but note track is paused)
-        // We don't cancel the session itself — it can resume
-      }
+      const cancelledJobs = await cancelSessionJobs(activeSessions);
 
       logger.info(
         { trackId: track._id, cancelledJobs, sessions: activeSessions.length },
@@ -317,6 +264,41 @@ router.patch(
       });
 
       res.json({ success: true, data: track });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// DELETE /tracks/:id — remove the track and everything derived from it
+router.delete(
+  "/:id",
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const track = await BetTrack.findOne({
+        _id: req.params.id,
+        userId: req.user!.userId,
+      });
+      if (!track) throw new AppError(404, "Track not found");
+
+      // Halt the autonomous loop before tearing anything down — it re-reads the
+      // track between steps and stops as soon as the status is not active.
+      if (track.status === TrackStatus.ACTIVE) {
+        track.status = TrackStatus.PAUSED;
+        await track.save();
+      }
+
+      const summary = await purgeTrack(track._id);
+
+      logger.info(
+        { trackId: req.params.id, userId: req.user!.userId, ...summary },
+        "Track deleted",
+      );
+
+      res.json({
+        success: true,
+        data: { _id: req.params.id, name: track.name, deleted: summary },
+      });
     } catch (err) {
       next(err);
     }
